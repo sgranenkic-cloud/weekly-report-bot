@@ -7,9 +7,14 @@ import dayjs from "dayjs";
 const BOT_TOKEN = process.env.BOT_TOKEN;
 if (!BOT_TOKEN) throw new Error("BOT_TOKEN is required");
 
-const TZ = process.env.TZ || "Europe/Amsterdam";
-const ADMIN_IDS = (process.env.ADMIN_TELEGRAM_IDS || "")
-  .split(",").map(s => s.trim()).filter(Boolean).map(Number);
+const TZ = process.env.TIMEZONE || process.env.TZ || "Europe/Amsterdam";
+
+const ADMIN_IDS = (process.env.ADMIN_TELEGRAM_IDS || process.env.CHAT_ID || "")
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean)
+  .map(Number);
+
 
 const db = new Database("bot.sqlite");
 db.exec(`
