@@ -7,16 +7,26 @@ import dayjs from "dayjs";
 const BOT_TOKEN = process.env.BOT_TOKEN;
 if (!BOT_TOKEN) throw new Error("BOT_TOKEN is required");
 
-// Railway обычно сам ставит TZ, но оставим поддержку env
+// Таймзона для cron (Railway/Node-cron)
 const TZ = process.env.TIMEZONE || process.env.TZ || "Europe/Amsterdam";
 
-// ТОЛЬКО числовые id. Ники сюда нельзя.
+// Куда отправлять готовые отчеты (в личку тебе/админу): только ЧИСЛОВЫЕ telegram id через запятую
+// Пример: ADMIN_TELEGRAM_IDS=314197872,123456789
 const ADMIN_IDS = (process.env.ADMIN_TELEGRAM_IDS || "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean)
-  .map((x) => Number(x))
+  .map((s) => Number(s))
   .filter((n) => Number.isFinite(n));
+
+// Если админы не заданы — можно (временно) хардкодом, но лучше через переменную Railway:
+const FALLBACK_RECEIVER_ID = Number(process.env.REPORT_RECEIVER_ID || "0"); // например 314197872
+function getReceivers() {
+  const set = new Set();
+  for (const id of ADMIN_IDS) set.add(id);
+  if (Number.isFinite(FALLBACK_RECEIVER_ID) && FALLBACK_RECEIVER_ID > 0) set.add(FALLBACK_RECEIVER_ID);
+  return Array.from(set);
+}
 
 const db = new Database("bot.sqlite");
 db.exec(`
@@ -29,13 +39,10 @@ CREATE TABLE IF NOT EXISTS conversations (
 `);
 
 function getConv(id) {
-  const row = db
-    .prepare(`SELECT step, payload FROM conversations WHERE telegram_id=?`)
-    .get(id);
+  const row = db.prepare(`SELECT step, payload FROM conversations WHERE telegram_id=?`).get(id);
   if (!row) return null;
   return { step: row.step, payload: JSON.parse(row.payload) };
 }
-
 function setConv(id, step, payload) {
   db.prepare(`
     INSERT INTO conversations (telegram_id, step, payload, updated_at)
@@ -46,18 +53,14 @@ function setConv(id, step, payload) {
       updated_at=CURRENT_TIMESTAMP
   `).run(id, step, JSON.stringify(payload));
 }
-
 function clearConv(id) {
   db.prepare(`DELETE FROM conversations WHERE telegram_id=?`).run(id);
 }
 
 function weekRange(kind) {
   const now = dayjs();
-  const day = now.day(); // 0=Sunday
-  const mondayThisWeek =
-    (day === 0 ? now.subtract(6, "day") : now.subtract(day - 1, "day")).startOf(
-      "day"
-    );
+  const day = now.day(); // 0 = Sunday
+  const mondayThisWeek = (day === 0 ? now.subtract(6, "day") : now.subtract(day - 1, "day")).startOf("day");
   const start = kind === "previous" ? mondayThisWeek.subtract(7, "day") : mondayThisWeek;
   const end = start.add(6, "day");
   return { startDate: start.format("YYYY-MM-DD"), endDate: end.format("YYYY-MM-DD") };
@@ -75,7 +78,7 @@ function parseSevenNumbers(input) {
 
 function parseScale1to10(input) {
   const n = Number(String(input).trim().replace(",", "."));
-  if (!Number.isFinite(n) || n < 1 || n > 10) return { error: "Оценка 1-10." };
+  if (!Number.isFinite(n) || n < 1 || n > 10) return { error: "Оценка 1–10." };
   return { value: n };
 }
 
@@ -90,6 +93,7 @@ function normalizeOptionalText(input, nonePhrases) {
 function buildReportText(payload) {
   const { range, answers } = payload;
   const lines = [];
+
   lines.push(`Еженедельный отчет (${range.startDate} — ${range.endDate})`);
   lines.push("");
   lines.push("Восстановление:");
@@ -99,11 +103,30 @@ function buildReportText(payload) {
   lines.push(`- Физически: ${answers.body}/10`);
   if (answers.food) lines.push(`- Питание: ${answers.food}`);
   if (answers.pain) lines.push(`- Самочувствие/травмы: ${answers.pain}`);
+
   lines.push("");
   lines.push("Комментарий недели:");
   lines.push(answers.weekComment);
-  if (answers.wishes) { lines.push(""); lines.push("Пожелания по плану:"); lines.push(answers.wishes); }
-  if (answers.questions) { lines.push(""); lines.push("Вопросы к тренеру:"); lines.push(answers.questions); }
+
+  if (answers.wishes) {
+    lines.push("");
+    lines.push("Пожелания по плану:");
+    lines.push(answers.wishes);
+  }
+
+  // ✅ НОВОЕ: корректировки плана
+  if (answers.planEdits) {
+    lines.push("");
+    lines.push("Корректировки предстоящего плана:");
+    lines.push(answers.planEdits);
+  }
+
+  if (answers.questions) {
+    lines.push("");
+    lines.push("Вопросы к тренеру:");
+    lines.push(answers.questions);
+  }
+
   return lines.join("\n");
 }
 
@@ -112,6 +135,7 @@ const bot = new Telegraf(BOT_TOKEN);
 function mainMenu() {
   return Markup.keyboard([["Заполнить отчет"]]).resize();
 }
+
 function weekKeyboard() {
   return Markup.inlineKeyboard([
     [Markup.button.callback("Текущая неделя", "WEEK_current")],
@@ -150,9 +174,10 @@ bot.action(/^WEEK_(current|previous)$/, async (ctx) => {
 
   setConv(id, "ask_rhr", payload);
 
-  await ctx.editMessageText("Ок. Начнем заполнение отчета.");
+  // дружелюбнее + вовлекающе
+  await ctx.editMessageText("Понял 🙂 Сейчас начнем — это займет пару минут.");
   await ctx.reply(
-    "Введи пульс покоя по дням в формате: 45 / 45 / 46 / 48 / 49 / 43 / 45. Если не знаешь — нажми 'не отслеживаю'.",
+    "Введи пульс покоя по дням в формате:\n45 / 45 / 46 / 48 / 49 / 43 / 45\n\nЕсли не знаешь или часы не отслеживают — жми кнопку «не отслеживаю».",
     Markup.keyboard([["не отслеживаю"]]).oneTime().resize()
   );
 
@@ -163,7 +188,6 @@ bot.on("text", async (ctx) => {
   const id = ctx.from.id;
   const conv = getConv(id);
   if (!conv) return;
-
   const msg = ctx.message.text;
 
   if (conv.step === "ask_rhr") {
@@ -172,7 +196,7 @@ bot.on("text", async (ctx) => {
     conv.payload.answers.rhr = p;
     setConv(id, "ask_sleep", conv.payload);
     return ctx.reply(
-      "Введи длительность сна по дням (часы), формат такой же: 7 / 8 / 6.5 / 7 / 7 / 8 / 9. Если не знаешь — 'не отслеживаю'.",
+      "Теперь сон по дням в формате:\n6.5 / 7.5 / 8 / 9 / 10 / 5.5 / 4.5\n\nЕсли не знаешь — «не отслеживаю».",
       Markup.keyboard([["не отслеживаю"]]).oneTime().resize()
     );
   }
@@ -182,7 +206,7 @@ bot.on("text", async (ctx) => {
     if (p.error) return ctx.reply(p.error);
     conv.payload.answers.sleep = p;
     setConv(id, "ask_mood", conv.payload);
-    return ctx.reply("Эмоциональное состояние 1–10.", Markup.removeKeyboard());
+    return ctx.reply("Твоё эмоциональное состояние по шкале 1–10 (1 — очень плохо, 10 — супер).", Markup.removeKeyboard());
   }
 
   if (conv.step === "ask_mood") {
@@ -190,7 +214,7 @@ bot.on("text", async (ctx) => {
     if (p.error) return ctx.reply(p.error);
     conv.payload.answers.mood = p.value;
     setConv(id, "ask_body", conv.payload);
-    return ctx.reply("Физическое состояние 1–10.");
+    return ctx.reply("Теперь физическое состояние 1–10 (1 — совсем тяжело, 10 — топ).");
   }
 
   if (conv.step === "ask_body") {
@@ -199,7 +223,7 @@ bot.on("text", async (ctx) => {
     conv.payload.answers.body = p.value;
     setConv(id, "ask_food", conv.payload);
     return ctx.reply(
-      "Комментарий по еде или 'нет комментариев'.",
+      "Коротко про питание за неделю (или жми «нет комментариев»).",
       Markup.keyboard([["нет комментариев"]]).oneTime().resize()
     );
   }
@@ -208,7 +232,7 @@ bot.on("text", async (ctx) => {
     conv.payload.answers.food = normalizeOptionalText(msg, ["нет комментариев"]);
     setConv(id, "ask_pain", conv.payload);
     return ctx.reply(
-      "Что-то болит? Если нет — 'нет комментариев'.",
+      "Есть ли боль/дискомфорт/травмы? Если нет — «нет комментариев».",
       Markup.keyboard([["нет комментариев"]]).oneTime().resize()
     );
   }
@@ -216,50 +240,58 @@ bot.on("text", async (ctx) => {
   if (conv.step === "ask_pain") {
     conv.payload.answers.pain = normalizeOptionalText(msg, ["нет комментариев"]);
     setConv(id, "ask_week_comment", conv.payload);
-    return ctx.reply("Общий комментарий по неделе.", Markup.removeKeyboard());
+    return ctx.reply(
+      "Теперь общий комментарий по неделе (как зашло, что было легко/тяжело, что заметил). Это поле обязательное 🙂",
+      Markup.removeKeyboard()
+    );
   }
 
   if (conv.step === "ask_week_comment") {
     const t = String(msg).trim();
-    if (t.length < 3) return ctx.reply("Комментарий слишком короткий.");
+    if (t.length < 3) return ctx.reply("Комментарий слишком короткий — напиши пару слов подробнее.");
     conv.payload.answers.weekComment = t;
     setConv(id, "ask_wishes", conv.payload);
     return ctx.reply(
-      "Пожелания. Если нет — 'нет пожеланий'.",
+      "Есть пожелания к плану на следующую неделю? (например: какой день удобнее под длительную, где хочется полегче/пожёстче)\n\nЕсли нет — «нет пожеланий».",
       Markup.keyboard([["нет пожеланий"]]).oneTime().resize()
     );
   }
 
   if (conv.step === "ask_wishes") {
     conv.payload.answers.wishes = normalizeOptionalText(msg, ["нет пожеланий"]);
+
+    // ✅ НОВОЕ: шаг корректировок будущего плана
+    setConv(id, "ask_plan_edits", conv.payload);
+    return ctx.reply(
+      "Теперь про уже запланированные тренировки.\n\nНужно что-то скорректировать?\nНапример: перенести/сократить/заменить/поменять местами.\n\nЕсли всё подходит — «без изменений».",
+      Markup.keyboard([["без изменений"]]).oneTime().resize()
+    );
+  }
+
+  if (conv.step === "ask_plan_edits") {
+    conv.payload.answers.planEdits = normalizeOptionalText(msg, ["без изменений"]);
     setConv(id, "ask_questions", conv.payload);
     return ctx.reply(
-      "Вопросы. Если нет — 'нет вопросов'.",
+      "Остались вопросы к тренеру? Если нет — «нет вопросов».",
       Markup.keyboard([["нет вопросов"]]).oneTime().resize()
     );
   }
 
   if (conv.step === "ask_questions") {
     conv.payload.answers.questions = normalizeOptionalText(msg, ["нет вопросов"]);
+
     const reportText = buildReportText(conv.payload);
 
-    // 1) пользователю (в этот же диалог с ботом)
-    await ctx.reply("✅ Отчет принят. Отправляю копию тебе и тренеру.", Markup.removeKeyboard());
-    await ctx.reply(`🧾 Твой отчет:\n\n${reportText}`);
+    // Пользователю в чат с ботом
+    await ctx.reply("✅ Отчет принят. Отправляю тебе в личку и админам (если настроены).", Markup.removeKeyboard());
+    await ctx.reply("🧾 Твой отчет:\n\n" + reportText);
 
-    // 2) тренеру(ам) — в личку тренера, если он уже писал боту /start хотя бы раз
-    if (!ADMIN_IDS.length) {
-      await ctx.reply("⚠️ Админы не настроены (переменная ADMIN_TELEGRAM_IDS пустая).");
-    } else {
-      const who = `@${ctx.from.username || "no_username"} (${ctx.from.first_name || ""})`;
-      for (const adminId of ADMIN_IDS) {
-        await ctx.telegram
-          .sendMessage(
-            adminId,
-            `📩 Новый отчет от ${who}\nID спортсмена: ${ctx.from.id}\n\n${reportText}`
-          )
-          .catch(() => {});
-      }
+    // Отправка в личку конкретным получателям (telegram id)
+    const receivers = getReceivers();
+    const meta = `📩 Новый отчет от @${ctx.from.username || "без_ника"} (id: ${ctx.from.id})\n\n`;
+
+    for (const rid of receivers) {
+      await ctx.telegram.sendMessage(rid, meta + reportText).catch(() => {});
     }
 
     clearConv(id);
@@ -267,15 +299,17 @@ bot.on("text", async (ctx) => {
   }
 });
 
-// напоминание раз в неделю (воскресенье 20:00), только админам
+// Напоминание по воскресеньям (можно оставить)
 cron.schedule(
   "0 20 * * 0",
   async () => {
-    for (const telegramId of ADMIN_IDS) {
+    const receivers = getReceivers();
+    if (receivers.length === 0) return;
+    for (const telegramId of receivers) {
       await bot.telegram
         .sendMessage(
           telegramId,
-          "Время еженедельного отчета. Заполним?",
+          "Время еженедельного отчета 🙂 Заполним?",
           Markup.inlineKeyboard([[Markup.button.callback("Да, начать", "TRIGGER_REPORT")]])
         )
         .catch(() => {});
