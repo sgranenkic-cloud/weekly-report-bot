@@ -141,6 +141,100 @@ bot.on("text", async (ctx) => {
   const msg = ctx.message.text;
 
   if (conv.step === "ask_rhr") {
+    const p = parseSevenNumbers(msg);
+    if (p.error) return ctx.reply(p.error);
+    conv.payload.answers.rhr = p;
+    setConv(id, "ask_sleep", conv.payload);
+    return ctx.reply(
+      "Введи длительность сна по дням ...",
+      Markup.keyboard([["не отслеживаю"]]).oneTime().resize()
+    );
+  }
+
+  if (conv.step === "ask_sleep") {
+    const p = parseSevenNumbers(msg);
+    if (p.error) return ctx.reply(p.error);
+    conv.payload.answers.sleep = p;
+    setConv(id, "ask_mood", conv.payload);
+    return ctx.reply("Эмоциональное состояние 1–10.", Markup.removeKeyboard());
+  }
+
+  if (conv.step === "ask_mood") {
+    const p = parseScale1to10(msg);
+    if (p.error) return ctx.reply(p.error);
+    conv.payload.answers.mood = p.value;
+    setConv(id, "ask_body", conv.payload);
+    return ctx.reply("Физическое состояние 1–10.");
+  }
+
+  if (conv.step === "ask_body") {
+    const p = parseScale1to10(msg);
+    if (p.error) return ctx.reply(p.error);
+    conv.payload.answers.body = p.value;
+    setConv(id, "ask_food", conv.payload);
+    return ctx.reply(
+      "Комментарий по еде или 'нет комментариев'.",
+      Markup.keyboard([["нет комментариев"]]).oneTime().resize()
+    );
+  }
+
+  if (conv.step === "ask_food") {
+    conv.payload.answers.food = normalizeOptionalText(msg, ["нет комментариев"]);
+    setConv(id, "ask_pain", conv.payload);
+    return ctx.reply(
+      "Что-то болит? Если нет — 'нет комментариев'.",
+      Markup.keyboard([["нет комментариев"]]).oneTime().resize()
+    );
+  }
+
+  if (conv.step === "ask_pain") {
+    conv.payload.answers.pain = normalizeOptionalText(msg, ["нет комментариев"]);
+    setConv(id, "ask_week_comment", conv.payload);
+    return ctx.reply("Общий комментарий по неделе.", Markup.removeKeyboard());
+  }
+
+  if (conv.step === "ask_week_comment") {
+    const t = String(msg).trim();
+    if (t.length < 3) return ctx.reply("Комментарий слишком короткий.");
+    conv.payload.answers.weekComment = t;
+    setConv(id, "ask_wishes", conv.payload);
+    return ctx.reply(
+      "Пожелания. Если нет — 'нет пожеланий'.",
+      Markup.keyboard([["нет пожеланий"]]).oneTime().resize()
+    );
+  }
+
+  if (conv.step === "ask_wishes") {
+    conv.payload.answers.wishes = normalizeOptionalText(msg, ["нет пожеланий"]);
+    setConv(id, "ask_questions", conv.payload);
+    return ctx.reply(
+      "Вопросы. Если нет — 'нет вопросов'.",
+      Markup.keyboard([["нет вопросов"]]).oneTime().resize()
+    );
+  }
+
+  if (conv.step === "ask_questions") {
+    conv.payload.answers.questions = normalizeOptionalText(msg, ["нет вопросов"]);
+    const reportText = buildReportText(conv.payload);
+
+    await ctx.reply("Отчет отправлен тренеру ✅", Markup.removeKeyboard());
+
+    for (const adminId of ADMIN_IDS) {
+      await ctx.telegram
+        .sendMessage(
+          adminId,
+          `📩 Новый отчет от @${ctx.from.username || ctx.from.first_name}\n\n${reportText}`
+        )
+        .catch(() => {});
+    }
+
+    clearConv(id);
+    return ctx.reply("Меню:", mainMenu());
+  }
+});
+
+
+  if (conv.step === "ask_rhr") {
     const p = parseSevenNumbers(msg); if (p.error) return ctx.reply(p.error);
     conv.payload.answers.rhr = p; setConv(id, "ask_sleep", conv.payload);
     return ctx.reply("Введи длительность сна по дням ...", Markup.keyboard([["не отслеживаю"]]).oneTime().resize());
