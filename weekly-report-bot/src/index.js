@@ -175,12 +175,25 @@ bot.on("text", async (ctx) => {
     setConv(id, "ask_questions", conv.payload);
     return ctx.reply("Вопросы. Если нет — 'нет вопросов'.", Markup.keyboard([["нет вопросов"]]).oneTime().resize());
   }
-  if (conv.step === "ask_questions") {
-    conv.payload.answers.questions = normalizeOptionalText(msg, ["нет вопросов"]);
-    const reportText = buildReportText(conv.payload);
-    await ctx.reply("Отчет:\n\n" + reportText, Markup.removeKeyboard());
-    clearConv(id);
-    return ctx.reply("Меню:", mainMenu());
+ if (conv.step === "ask_questions") {
+  conv.payload.answers.questions = normalizeOptionalText(msg, ["нет вопросов"]);
+
+  const reportText = buildReportText(conv.payload);
+
+  // пользователю
+  await ctx.reply("Отчет отправлен тренеру ✅", Markup.removeKeyboard());
+
+  // отправка тренеру
+  for (const adminId of ADMIN_IDS) {
+    await ctx.telegram.sendMessage(adminId,
+      `📩 Новый отчет от @${ctx.from.username || ctx.from.first_name}\n\n${reportText}`
+    ).catch(()=>{});
+  }
+
+  clearConv(id);
+  return ctx.reply("Меню:", mainMenu());
+}
+
   }
 });
 
